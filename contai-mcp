@@ -1,0 +1,66 @@
+#!/bin/sh
+set -eu
+
+net=contai-net
+name=contai-github-mcp
+image=contai-github-mcp:latest
+
+# How to retrieve the PAT from the Secret Service (libsecret/KeePassXC).
+# Override by exporting CONTAI_MCP_PAT_CMD. Set to `false` to disable lookups.
+: "${CONTAI_MCP_PAT_CMD:=secret-tool lookup service github-mcp}"
+: "${CONTAI_MCP_TOOLSETS:=all}"
+
+is_running() {
+	test -n "$(docker ps -q -f "name=^/$name$" -f status=running)"
+}
+
+up() {
+	if is_running
+	then
+		return 0
+	fi
+
+	# Enable knob: a retrievable PAT means "on".
+	if ! pat=$(eval "$CONTAI_MCP_PAT_CMD" 2>/dev/null) || test -z "$pat"
+	then
+		echo "contai-mcp: no PAT found; github MCP disabled" >&2
+		return 1
+	fi
+
+	docker network inspect "$net" >/dev/null 2>&1 || docker network create "$net" >/dev/null
+	docker rm -f "$name" >/dev/null 2>&1 || true
+
+	export GITHUB_PERSONAL_ACCESS_TOKEN="$pat"
+
+	# Build args safely (POSIX, shellcheck-clean).
+	set -- -d --name "$name" --network "$net" --restart unless-stopped \
+		--cap-drop=ALL --security-opt=no-new-privileges \
+		--read-only --tmpfs /tmp:rw,nosuid,nodev,size=64m \
+		--pids-limit 256 --memory 512m \
+		-e GITHUB_PERSONAL_ACCESS_TOKEN \
+		-e GITHUB_TOOLSETS="$CONTAI_MCP_TOOLSETS"
+	if test -n "${CONTAI_MCP_READONLY:-}"
+	then
+		set -- "$@" -e GITHUB_READ_ONLY=1
+	fi
+	set -- "$@" "$image"
+
+	docker run "$@" >/dev/null
+	unset GITHUB_PERSONAL_ACCESS_TOKEN pat
+}
+
+down() {
+	docker rm -f "$name" >/dev/null 2>&1 || true
+}
+
+status() {
+	docker ps -f "name=^/$name$"
+}
+
+cmd=${1:-up}
+case "$cmd" in
+	up) up ;;
+	down) down ;;
+	status) status ;;
+	*) echo "usage: contai-mcp [up|down|status]" >&2; exit 2 ;;
+esac
