@@ -23,7 +23,9 @@ RUN apt-get update && apt-get install -y \
 	python3-pip \
 	shellcheck \
 	shfmt \
-	ripgrep
+	ripgrep \
+	tmux \
+	unzip
 
 RUN pip install --break-system-packages \
 	black \
