@@ -1,6 +1,11 @@
 #!/bin/sh
 set -eu
 
+if test -f "$HOME/.profile"
+then
+    . "$HOME/.profile"
+fi
+
 tool=
 
 if test $# -gt 0
