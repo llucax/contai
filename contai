@@ -16,9 +16,19 @@ env_file="$data_dir/env.list"
 mkdir -p "$home_dir"
 touch "$env_file"
 
+# Bring up the github MCP sidecar if a PAT is available (no-op otherwise) and
+# join its private network only when it is actually running.
+net_opt=
+"$(dirname "$0")/contai-mcp" up >/dev/null 2>&1 || true
+if test -n "$(docker ps -q -f 'name=^/contai-github-mcp$' -f status=running)"
+then
+	net_opt=--network=contai-net
+fi
+
 docker run \
 	--rm \
 	-it \
+	${net_opt:+"$net_opt"} \
 	--user $(id -un):$(id -gn) \
 	--cap-drop=ALL \
 	--security-opt=no-new-privileges \
