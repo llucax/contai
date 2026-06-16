@@ -18,9 +18,11 @@ contai/
 ├── AGENTS.md              # This file - AI agent instructions
 ├── README.md              # Project documentation
 ├── Dockerfile             # Container definition with dev tools
-├── build.sh               # Build script with user permission handling
+├── github-mcp.Dockerfile  # Isolated GitHub MCP sidecar image definition
+├── build.sh               # Build script (builds both images)
 ├── contai                 # Container runner script
 ├── contai-bootstrap       # Runtime container bootstrap for RTK setup
+├── contai-mcp             # Host script managing the GitHub MCP sidecar
 └── agent-instructions.md  # Global agent instructions for end users
 ```
 
@@ -28,7 +30,7 @@ contai/
 
 | Command      | Description                                              |
 |--------------|----------------------------------------------------------|
-| `./build.sh` | Builds Docker image tagged as `contai:latest`            |
+| `./build.sh` | Builds `contai:latest` and `contai-github-mcp:latest`    |
 | `./contai`   | Runs the container with current directory mounted        |
 
 ### Building the Container
@@ -38,6 +40,9 @@ contai/
 ```
 
 The build script passes host UID/GID to ensure proper file permissions inside the container.
+
+It also builds the optional `contai-github-mcp:latest` sidecar image (the
+isolated GitHub MCP server). Set `build_mcp=false` in `build.sh` to skip it.
 
 ### Running the Container
 
@@ -54,6 +59,8 @@ This project has no test suite. Changes should be verified by:
 3. Verifying the AI tools work: `./contai opencode --version`
 4. Verifying binary-installed tools work: `./contai rtk --version`
 5. Verifying RTK bootstrap writes the expected runtime config for shipped tools
+6. Verifying the GitHub MCP sidecar starts when a PAT is available
+   (`contai-mcp status`) and that `./contai` joins the `contai-net` network
 
 ## Linting
 
@@ -63,8 +70,8 @@ No project-level linting is configured. However, the container includes these to
 
 To lint shell scripts locally (if shellcheck is installed):
 ```sh
-shellcheck build.sh contai contai-bootstrap
-shfmt -d build.sh contai contai-bootstrap
+shellcheck build.sh contai contai-bootstrap contai-mcp
+shfmt -d build.sh contai contai-bootstrap contai-mcp
 ```
 
 ## Code Style Guidelines
@@ -186,6 +193,31 @@ The container uses these host directories:
 - `~/.local/share/contai/home`: Persistent home directory
 - `~/.local/share/contai/env.list`: Environment variables for container
 
+## GitHub MCP Sidecar
+
+`github-mcp.Dockerfile` builds `contai-github-mcp:latest`, a hardened sidecar
+that bridges the official `github-mcp-server` (stdio) to an unauthenticated
+Streamable HTTP endpoint via `supergateway`. The host script `contai-mcp`
+manages its lifecycle (`up`/`down`/`status`).
+
+Runtime behavior, wired from `contai`:
+- `contai` calls `contai-mcp up` on every launch. The sidecar starts only when a
+  PAT is retrievable (default: `secret-tool lookup service github-mcp`); no PAT
+  means no sidecar and unchanged behavior.
+- When the sidecar is running, `contai` attaches the opencode container to the
+  private `contai-net` network so it can reach
+  `http://contai-github-mcp:8082/mcp`.
+- The PAT lives only in the sidecar's environment (passed to Docker by name, not
+  value). It never enters `env.list`, the opencode container, argv, or disk.
+- The sidecar runs with no host bind mounts, no published ports, `--cap-drop=ALL`,
+  `--security-opt=no-new-privileges`, read-only rootfs, and pids/memory limits.
+- contai ships no opencode configuration; wiring opencode to the MCP and any
+  write-gating policy is the user's choice (see README.md).
+
+Knobs: `CONTAI_MCP_PAT_CMD` (lookup command / enable), `CONTAI_MCP_TOOLSETS`
+(default `all`), `CONTAI_MCP_READONLY` (set = read-only), and `build_mcp` in
+`build.sh`.
+
 ## Adding New Features
 
 When modifying this project:
@@ -213,6 +245,11 @@ this AGENTS.md file to reflect those changes.
 ### Adding System Packages
 1. Add package to `apt-get install -y` section
 2. Rebuild and test
+
+### Updating the GitHub MCP Server Version
+1. Bump the pinned `ghcr.io/github/github-mcp-server:<tag>` in `github-mcp.Dockerfile`
+2. Rebuild: `./build.sh`
+3. Recreate the sidecar: `contai-mcp down` (the next `./contai` recreates it)
 
 ### Debugging Container Issues
 ```sh

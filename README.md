@@ -29,6 +29,9 @@ system (i.e. normal people).
   installing additional tools without root access
 - **Symlink-friendly**: Can be symlinked as different tool names (e.g.,
   `opencode` symlink runs OpenCode directly)
+- **Isolated GitHub MCP (optional)**: Optionally exposes the official GitHub MCP
+  server to the AI tools from a separate, hardened sidecar, so your GitHub token
+  never enters the tool's container (see the GitHub MCP Server section below)
 
 ## Build
 
@@ -57,8 +60,9 @@ After building, you can install `contai` to your PATH:
 # Create a bin directory in your home (if it doesn't exist)
 mkdir -p ~/bin
 
-# Copy the contai script
-cp contai ~/bin/
+# Copy the contai script (plus contai-mcp if you want the isolated GitHub MCP
+# server described below; it must sit next to contai in your PATH)
+cp contai contai-mcp ~/bin/
 
 # Make sure ~/bin is in your PATH (add to ~/.bashrc or ~/.zshrc if needed)
 export PATH="$HOME/bin:$PATH"
@@ -179,6 +183,113 @@ You can define environment variables in the container by writing to a
 `~/.local/share/contai/env.list` file. The file is expected to have the
 standard [docker `--env-file`
 format](https://docs.docker.com/reference/cli/docker/container/run/#env).
+
+## GitHub MCP Server (Isolated)
+
+`contai` can give the AI tools access to GitHub through the official
+[`github-mcp-server`](https://github.com/github/github-mcp-server) **without**
+ever placing your GitHub token inside the AI tool's container. The token lives
+only in a separate, hardened sidecar container (`contai-github-mcp`); the AI
+container reaches it token-free over a private Docker network. A compromised MCP
+server cannot read your host files, and the tool container never holds the token.
+
+The sidecar is **enabled by the mere presence of a Personal Access Token (PAT)**
+in your keyring — there is no separate on/off switch. On every launch, `contai`
+starts the sidecar if (and only if) a PAT can be retrieved, then joins the
+`contai-net` network so the endpoint `http://contai-github-mcp:8082/mcp` becomes
+reachable. No PAT means no sidecar and unchanged behavior.
+
+`contai` ships **no** opencode configuration: wiring opencode to the MCP (and any
+write-gating policy) is your choice, as described below.
+
+### 1. Store a GitHub PAT in your keyring
+
+By default `contai` looks the token up with
+`secret-tool lookup service github-mcp` (libsecret / Secret Service). Either:
+
+- store it directly:
+
+  ```sh
+  secret-tool store --label='github-mcp PAT' service github-mcp
+  ```
+
+- or, with KeePassXC, add a custom attribute `service=github-mcp` to an entry and
+  enable KeePassXC's Secret Service integration.
+
+Use a least-privilege, fine-grained PAT (limit it to the repositories and
+permissions you actually need) — the token's scope is the blast radius.
+
+To stop using the MCP, remove the secret (or run `contai-mcp down`). To skip the
+keyring lookup entirely, export `CONTAI_MCP_PAT_CMD=false`.
+
+### 2. Wire opencode to the MCP
+
+contai does not do this for you. Add the server to your opencode config —
+globally at
+`~/.local/share/contai/home/.config/opencode/opencode.json` (the contai home maps
+to the container `$HOME`) or per project:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "github": {
+      "type": "remote",
+      "url": "http://contai-github-mcp:8082/mcp",
+      "enabled": true,
+      "oauth": false,
+      "timeout": 15000
+    }
+  }
+}
+```
+
+### 3. (Optional) Gate writes in opencode
+
+With a read-write sidecar you can ask before write tools run. opencode MCP tools
+are named `github_<tool>` and obey the normal permission rules (last match wins,
+so the catch-all comes first):
+
+```json
+{
+  "permission": {
+    "github_*": "ask",
+    "github_get_*": "allow",
+    "github_list_*": "allow",
+    "github_search_*": "allow",
+    "github_*_read": "allow",
+    "github_actions_get": "allow",
+    "github_actions_list": "allow"
+  }
+}
+```
+
+This is a **model guardrail, not a containment boundary**: code the agent runs
+via `bash` (e.g. `curl` to the unauthenticated endpoint) could still write within
+the PAT's scope without a prompt. For a hard, non-bypassable guarantee, run the
+sidecar read-only instead (`CONTAI_MCP_READONLY=1`, see below).
+
+### Configuration knobs
+
+| Variable / setting     | Default                                 | Effect                                                                                |
+|------------------------|-----------------------------------------|---------------------------------------------------------------------------------------|
+| `CONTAI_MCP_PAT_CMD`   | `secret-tool lookup service github-mcp` | PAT lookup command; also the de-facto enable switch (set to `false` to disable lookups) |
+| `CONTAI_MCP_TOOLSETS`  | `all`                                   | GitHub toolsets to expose; trim for context/token budget                              |
+| `CONTAI_MCP_READONLY`  | unset (read-write)                      | Set to any value for a hard, server-side read-only guarantee                          |
+| `build_mcp` (build.sh) | `true`                                  | Set to `false` to skip building the sidecar image                                     |
+
+### Security properties
+
+- **Token isolation**: the PAT exists only in the sidecar's environment (fetched
+  from the keyring at start, passed to Docker by name). It is absent from
+  `env.list`, the AI container, process arguments, and disk.
+- **No host filesystem**: the sidecar has zero bind mounts, so it cannot read
+  host files; its only reach is the GitHub API (scoped by the PAT) and the AI
+  container on `contai-net`. It publishes no ports to the host.
+- **Hardening**: `--cap-drop=ALL`, `--security-opt=no-new-privileges`, read-only
+  rootfs + tmpfs, non-root user, and pids/memory limits.
+- For the strongest write protection, run the sidecar read-only with
+  `CONTAI_MCP_READONLY=1` rather than relying on opencode's permission prompts.
 
 ## Known Issues
 
