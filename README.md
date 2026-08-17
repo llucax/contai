@@ -41,6 +41,14 @@ To build the container image:
 This will create a Docker image tagged as `contai:latest` with your host user's
 UID/GID for proper file permissions.
 
+To override the account created in the image, set `CONTAI_UID`, `CONTAI_USER`,
+`CONTAI_GID`, and/or `CONTAI_GROUP` when building:
+
+```sh
+CONTAI_UID=1000 CONTAI_USER=developer CONTAI_GID=1000 CONTAI_GROUP=developers \
+	./build.sh
+```
+
 ## Installation
 
 After building, you can install `contai` to your PATH:
