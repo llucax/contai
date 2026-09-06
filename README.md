@@ -514,6 +514,12 @@ points the container's `gpg` at it, and signing works.
 | `CONTAI_GPG_CACHE_TTL`    | `604800` (a week)                             | For how long the agent keeps the passphrase before it must be preset again |
 | `sidecars` (build.sh)     | `github-mcp gpg`                              | Drop `gpg` to skip building the sidecar image                         |
 
+`CONTAI_SIDECAR_VERBOSE` applies to both sidecars. `contai` shows what
+`contai-sidecar` reports, so that a sidecar which was set up and then broke says
+so at launch, but it stays quiet about the ones that are simply not set up.
+Setting this to anything makes it mention those too, which is the quickest way
+to find out why a sidecar you expected did not come up.
+
 ### What this protects, and what it does not
 
 - **The key does not leave the sidecar.** The store is bind-mounted into the

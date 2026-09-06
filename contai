@@ -93,11 +93,15 @@ read_opts() {
 
 # Bring up the sidecars, each of which is a no-op unless it is configured, and
 # ask what the container needs in order to reach the ones that came up: a
-# network to join, a socket volume to mount. Their own diagnostics are hidden,
-# as running without a sidecar is the normal case; run `contai-sidecar up` by
-# hand to see why one stayed down.
+# network to join, a socket volume to mount.
+#
+# What contai-sidecar has to say goes through, so that a sidecar which was set
+# up and then broke says so here rather than at the point where the tool needs
+# it. It keeps quiet about the ones that are simply not set up, which is the
+# normal case; CONTAI_SIDECAR_VERBOSE covers those too. `opts` is muted because
+# anything it could complain about, `up` has just complained about.
 sidecar=$(dirname "$0")/contai-sidecar
-"$sidecar" up >/dev/null 2>&1 || true
+"$sidecar" up >/dev/null || true
 sidecar_opts=$("$sidecar" opts 2>/dev/null) || sidecar_opts=
 
 read_opts <<EOF

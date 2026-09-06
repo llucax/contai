@@ -265,9 +265,13 @@ container needs to reach it.
 
 `contai` calls `contai-sidecar up` on every launch and then appends the output
 of `contai-sidecar opts` to its own `docker run` options, so nothing about a
-particular sidecar is hardcoded there. Their diagnostics are discarded, since
-running without a sidecar is the normal case; run `contai-sidecar up` by hand to
-see why one stayed down.
+particular sidecar is hardcoded there.
+
+What a hook reports and how loudly is the hook's own business, and the split
+matters: `note` is for a sidecar nobody set up, which is the normal case and
+therefore silent unless `CONTAI_SIDECAR_VERBOSE` is set, while `warn` is for one
+that was set up and did not work. `contai` shows the second kind, so a sidecar
+that broke says so at launch instead of at the point where the tool needs it.
 
 ### github-mcp
 
@@ -323,7 +327,8 @@ image only and are not installed on the host.
   governs passphrases typed into a pinentry, and the image ships none.
 
 Knobs: `CONTAI_GPG_SECRET_CMD` (lookup command / enable),
-`CONTAI_GPG_CACHE_TTL` (default a week).
+`CONTAI_GPG_CACHE_TTL` (default a week). `CONTAI_SIDECAR_VERBOSE` is generic and
+applies to every sidecar.
 
 ## Adding New Features
 
@@ -366,7 +371,8 @@ this AGENTS.md file to reflect those changes.
 ### Adding a Sidecar
 1. Write `<name>.Dockerfile` and add `<name>` to `sidecars` in `build.sh`
 2. Add a block to `contai-sidecar` defining the container name and the start,
-   prime and opts hooks, then add `<name>` to its `services` list
+   prime and opts hooks, then add `<name>` to its `services` list. Report a
+   sidecar nobody set up with `note` and an actual failure with `warn`
 3. If the AI container needs anything at runtime to use it, put that in
    `contai-bootstrap`, keyed off whatever the opts hook mounts
 4. Document it in README.md and in the Sidecars section above

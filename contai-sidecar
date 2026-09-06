@@ -10,14 +10,29 @@ set -eu
 # "up", and an opts hook printing the docker run options the AI container
 # needs to reach it. Adding a sidecar means adding a block and a name to
 # $services.
+#
+# Both hooks that can fail report what happened themselves, so that the
+# generic part does not have to guess: `note` for a sidecar nobody asked for,
+# `warn` for one that was asked for and did not work.
 
 self=$(basename "$0")
 
 # In start order. Naming a service on the command line picks a subset.
 services='github-mcp gpg'
 
+# Something is wrong and whoever set it up wants to know.
 warn() {
 	printf '%s: %s\n' "$self" "$1" >&2
+}
+
+# Nothing is wrong: a sidecar is simply not set up, which is the normal case
+# for everyone not using it. contai shows what comes out of here, so this has
+# to stay quiet, or every run would nag about the sidecars one does not want.
+note() {
+	if test -n "${CONTAI_SIDECAR_VERBOSE:-}"
+	then
+		printf '%s: %s\n' "$self" "$1" >&2
+	fi
 }
 
 # --- github-mcp: the GitHub API behind a PAT the AI container never sees ---
@@ -35,7 +50,7 @@ github_mcp_start() {
 	# Enable knob: a retrievable PAT means "on".
 	if ! pat=$(eval "$CONTAI_MCP_PAT_CMD" 2>/dev/null) || test -z "$pat"
 	then
-		warn "no PAT found; github-mcp disabled"
+		note "no PAT found; github-mcp disabled"
 		return 1
 	fi
 
@@ -59,7 +74,12 @@ github_mcp_start() {
 	fi
 	set -- "$@" "$github_mcp_image"
 
-	docker run "$@" >/dev/null
+	if ! docker run "$@" >/dev/null
+	then
+		warn "could not start $github_mcp_container"
+		return 1
+	fi
+
 	unset GITHUB_PERSONAL_ACCESS_TOKEN pat
 }
 
@@ -95,7 +115,7 @@ gpg_start() {
 	# Enable knob: a key in the store means "on".
 	if ! gpg_has_secret_keys
 	then
-		warn "no secret keys in $gpg_home; gpg disabled"
+		note "no secret keys in $gpg_home; gpg disabled"
 		return 1
 	fi
 
@@ -227,7 +247,10 @@ up_one() {
 
 	if is_running || "$svc_start"
 	then
-		"$svc_prime" || warn "$1: priming failed"
+		# Prime hooks report their own failures, so the status is only
+		# caught here to keep one sidecar that could not be primed from
+		# ending the whole run under `set -e`.
+		"$svc_prime" || true
 	fi
 
 	# Whatever went wrong with one sidecar, the next one and the contai run
@@ -261,6 +284,9 @@ usage() {
 		status  list the sidecar containers
 		opts    print the docker run options the AI container needs to
 		        reach the running sidecars, one argument per line
+
+		Set CONTAI_SIDECAR_VERBOSE to also hear about the sidecars that
+		stayed down because they are not set up.
 	EOF
 	exit 2
 }
