@@ -76,7 +76,11 @@ gpg_volume=contai-gpg-sock
 # The restricted socket, as the sidecar and the AI container respectively see
 # it. The docker volume above is all they share.
 gpg_sidecar_socket_dir=/run/contai-gpg
+gpg_sidecar_socket=$gpg_sidecar_socket_dir/S.gpg-agent
 gpg_client_socket_dir=/run/contai/gpg
+
+# How many seconds to give the agent to answer after the container is created.
+gpg_start_timeout=10
 
 # The secret keys, mounted into the gpg sidecar and into nothing else. The AI
 # container keeps only the public half of the key in its own home.
@@ -99,21 +103,53 @@ gpg_start() {
 
 	# No network at all: the agent talks to nothing but the two sockets. The
 	# key store is the only bind mount, and the AI container never gets it.
-	docker run -d --name "$gpg_container" \
+	if ! docker run -d --name "$gpg_container" \
 		--network none --restart unless-stopped \
 		--cap-drop=ALL --security-opt=no-new-privileges \
 		--pids-limit 64 --memory 256m \
 		-e CONTAI_GPG_CACHE_TTL="$CONTAI_GPG_CACHE_TTL" \
-		-e CONTAI_GPG_EXTRA_SOCKET="$gpg_sidecar_socket_dir/S.gpg-agent" \
+		-e CONTAI_GPG_EXTRA_SOCKET="$gpg_sidecar_socket" \
 		-v "$gpg_home:/gnupg" \
 		-v "$gpg_volume:$gpg_sidecar_socket_dir" \
 		"$gpg_image" >/dev/null
+	then
+		warn "could not start $gpg_container"
+		return 1
+	fi
+
+	if ! gpg_wait_for_agent
+	then
+		warn "$gpg_container is up but its agent never answered"
+		warn "see what it says: docker logs $gpg_container"
+		return 1
+	fi
 }
 
 gpg_has_secret_keys() {
 	test -d "$gpg_home/private-keys-v1.d" || return 1
 	set -- "$gpg_home"/private-keys-v1.d/*.key
 	test -e "$1"
+}
+
+# `docker run -d` returns once the container exists, which is a moment before
+# gpg-agent has bound its sockets, so priming right away would be talking to
+# something that is not listening yet. Wait for an answer on the very socket
+# the AI container will use, which doubles as the first proof that the whole
+# path works.
+gpg_wait_for_agent() {
+	waited=0
+
+	while ! docker exec "$gpg_container" gpg-connect-agent \
+		--no-autostart -S "$gpg_sidecar_socket" /bye >/dev/null 2>&1
+	do
+		if test "$waited" -ge "$gpg_start_timeout"
+		then
+			return 1
+		fi
+
+		sleep 1
+		waited=$((waited + 1))
+	done
 }
 
 # Fill gpg-agent's passphrase cache, so that signing in the AI container needs
