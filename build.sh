@@ -1,24 +1,34 @@
 #!/bin/sh
 set -eu
 
-# Build the optional github-mcp sidecar image. Set to false to skip.
-build_mcp=true
+# Optional sidecar images to build alongside the main one. Each name maps to
+# "<name>.Dockerfile" and the tag "contai-<name>:latest", and is what
+# contai-sidecar calls the service. Empty the list to build only contai
+# itself.
+sidecars='github-mcp'
+
+uid=${CONTAI_UID:-$(id -u)}
+username=${CONTAI_USER:-$(id -un)}
+gid=${CONTAI_GID:-$(id -g)}
+groupname=${CONTAI_GROUP:-$(id -gn)}
 
 docker build \
 	-t contai:latest \
-	--build-arg "UID=${CONTAI_UID:-$(id -u)}" \
-	--build-arg "USERNAME=${CONTAI_USER:-$(id -un)}" \
-	--build-arg "GID=${CONTAI_GID:-$(id -g)}" \
-	--build-arg "GROUPNAME=${CONTAI_GROUP:-$(id -gn)}" \
+	--build-arg "UID=$uid" \
+	--build-arg "USERNAME=$username" \
+	--build-arg "GID=$gid" \
+	--build-arg "GROUPNAME=$groupname" \
 	--build-arg "HOME_DIR=${CONTAI_HOME:-$HOME}" \
 	"$@" \
 	-f Dockerfile \
 	.
 
-if test "$build_mcp" = "true"
-then
-	docker build \
-		-t contai-github-mcp:latest \
-		-f github-mcp.Dockerfile \
-		.
-fi
+# The main build is done, so the positional parameters are free to collect the
+# arguments of each sidecar build. Sidecar names hold no whitespace.
+# shellcheck disable=SC2086
+for sidecar in $sidecars
+do
+	set -- -t "contai-$sidecar:latest" -f "$sidecar.Dockerfile"
+
+	docker build "$@" .
+done

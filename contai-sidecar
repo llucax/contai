@@ -1,0 +1,197 @@
+#!/bin/sh
+set -eu
+
+# Manages contai's sidecars: separate containers holding something the AI
+# container must not hold itself, and reachable from it through one narrow
+# channel only.
+#
+# Every service below defines four things: a container name, a start hook that
+# refuses when the service is not configured, a prime hook run after every
+# "up", and an opts hook printing the docker run options the AI container
+# needs to reach it. Adding a sidecar means adding a block and a name to
+# $services.
+
+self=$(basename "$0")
+
+# In start order. Naming a service on the command line picks a subset.
+services='github-mcp'
+
+warn() {
+	printf '%s: %s\n' "$self" "$1" >&2
+}
+
+# --- github-mcp: the GitHub API behind a PAT the AI container never sees ---
+
+github_mcp_net=contai-net
+github_mcp_container=contai-github-mcp
+github_mcp_image=contai-github-mcp:latest
+
+# How to retrieve the PAT from the Secret Service (libsecret/KeePassXC).
+# Override by exporting CONTAI_MCP_PAT_CMD. Set to `false` to disable lookups.
+: "${CONTAI_MCP_PAT_CMD:=secret-tool lookup service github-mcp}"
+: "${CONTAI_MCP_TOOLSETS:=all}"
+
+github_mcp_start() {
+	# Enable knob: a retrievable PAT means "on".
+	if ! pat=$(eval "$CONTAI_MCP_PAT_CMD" 2>/dev/null) || test -z "$pat"
+	then
+		warn "no PAT found; github-mcp disabled"
+		return 1
+	fi
+
+	docker network inspect "$github_mcp_net" >/dev/null 2>&1 ||
+		docker network create "$github_mcp_net" >/dev/null
+	docker rm -f "$github_mcp_container" >/dev/null 2>&1 || true
+
+	export GITHUB_PERSONAL_ACCESS_TOKEN="$pat"
+
+	# Build args safely (POSIX, shellcheck-clean).
+	set -- -d --name "$github_mcp_container" \
+		--network "$github_mcp_net" --restart unless-stopped \
+		--cap-drop=ALL --security-opt=no-new-privileges \
+		--read-only --tmpfs /tmp:rw,nosuid,nodev,size=64m \
+		--pids-limit 256 --memory 512m \
+		-e GITHUB_PERSONAL_ACCESS_TOKEN \
+		-e GITHUB_TOOLSETS="$CONTAI_MCP_TOOLSETS"
+	if test -n "${CONTAI_MCP_READONLY:-}"
+	then
+		set -- "$@" -e GITHUB_READ_ONLY=1
+	fi
+	set -- "$@" "$github_mcp_image"
+
+	docker run "$@" >/dev/null
+	unset GITHUB_PERSONAL_ACCESS_TOKEN pat
+}
+
+github_mcp_opts() {
+	echo "--network=$github_mcp_net"
+}
+
+# --- the generic part -----------------------------------------------------
+
+# Points the svc_* variables at the hooks of one service. Every action below
+# calls this first, so an unknown name is caught in one place.
+select_service() {
+	svc_prime=:
+	svc_opts=:
+
+	case $1 in
+	github-mcp)
+		svc_container=$github_mcp_container
+		svc_start=github_mcp_start
+		svc_opts=github_mcp_opts
+		;;
+	*)
+		warn "unknown sidecar: $1"
+		return 1
+		;;
+	esac
+}
+
+is_running() {
+	test -n "$(docker ps -q -f "name=^/$svc_container$" -f status=running)"
+}
+
+up_one() {
+	select_service "$1"
+
+	if is_running || "$svc_start"
+	then
+		"$svc_prime" || warn "$1: priming failed"
+	fi
+
+	# Whatever went wrong with one sidecar, the next one and the contai run
+	# itself are still worth attempting.
+	return 0
+}
+
+down_one() {
+	select_service "$1"
+	docker rm -f "$svc_container" >/dev/null 2>&1 || true
+}
+
+opts_one() {
+	select_service "$1"
+
+	if is_running
+	then
+		"$svc_opts"
+	fi
+}
+
+usage() {
+	cat >&2 <<-EOF
+		usage: $self [up|down|status] [<service>...]
+		       $self opts [<service>...]
+
+		Services: $services. All of them when none is named.
+
+		up      start the sidecars that are configured, and prime them
+		down    remove the sidecar containers
+		status  list the sidecar containers
+		opts    print the docker run options the AI container needs to
+		        reach the running sidecars, one argument per line
+	EOF
+	exit 2
+}
+
+cmd=${1:-up}
+
+if test $# -gt 0
+then
+	shift
+fi
+
+targets=$*
+
+if test -z "$targets"
+then
+	targets=$services
+fi
+
+# Service names hold no whitespace, so the unquoted expansions below split
+# exactly where they should. Checking every name up front keeps a typo from
+# acting on half the sidecars before failing.
+# shellcheck disable=SC2086
+for name in $targets
+do
+	select_service "$name" || exit 2
+done
+
+case $cmd in
+up)
+	# shellcheck disable=SC2086
+	for name in $targets
+	do
+		up_one "$name"
+	done
+	;;
+down)
+	# shellcheck disable=SC2086
+	for name in $targets
+	do
+		down_one "$name"
+	done
+	;;
+opts)
+	# shellcheck disable=SC2086
+	for name in $targets
+	do
+		opts_one "$name"
+	done
+	;;
+status)
+	# Repeated name filters are OR'ed by docker, so one listing covers them.
+	set -- ps
+	# shellcheck disable=SC2086
+	for name in $targets
+	do
+		select_service "$name"
+		set -- "$@" -f "name=^/$svc_container$"
+	done
+	docker "$@"
+	;;
+*)
+	usage
+	;;
+esac
