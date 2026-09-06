@@ -297,6 +297,13 @@ keys. Its two scripts, `contai-gpg-agent` and `contai-gpg-preset`, live in that
 image only and are not installed on the host.
 
 - It starts only when `~/.local/share/contai/gpg/private-keys-v1.d` holds a key.
+  Only the signing subkey belongs in that store: priming presents the passphrase
+  for every signing-capable key it finds there, so anything else in it is
+  unlocked for no reason.
+- `docker run -d` returns before gpg-agent has bound its sockets, so `gpg_start`
+  waits for the agent to answer on the extra socket before priming. Without that
+  the first prime of a fresh container races the agent, and a lost race would
+  also mean a pointless keyring prompt.
 - The AI container sees the agent through its *extra* socket, which `gpg-agent`
   serves in restricted mode: `PKSIGN` and `PKDECRYPT` work there, `EXPORT_KEY`,
   `IMPORT_KEY`, `DELETE_KEY`, `PASSWD` and `PRESET_PASSPHRASE` are refused. That
