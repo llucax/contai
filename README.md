@@ -406,13 +406,16 @@ answers `Forbidden`.
 Like the MCP, the sidecar has **no on/off switch**: it starts when its key store
 holds a secret key, and stays down otherwise.
 
-### 1. Move the signing key into the sidecar's store
+### 1. Move the signing subkey into the sidecar's store
 
-The store is `~/.local/share/contai/gpg`, and it is mounted into the gpg sidecar
-and into nothing else. It needs the secret key and the public half of it, which
-is what `gpg` reads in order to know which secret keys it has at all.
+The store is `~/.local/share/contai/gpg`, mounted into the gpg sidecar and into
+nothing else. It needs the public half of the key, which is what `gpg` reads in
+order to know which secret keys it has at all, and the secret half of the
+signing subkey. Nothing else belongs there: the sidecar presents the passphrase
+of every signing-capable key it holds, and a key it cannot be asked to use is
+one that cannot be misused.
 
-Coming from a key that already sits in the container home:
+Set the two directories up and copy the public half over:
 
 ```sh
 store=~/.local/share/contai/gpg
@@ -422,11 +425,45 @@ mkdir -p "$store/private-keys-v1.d"
 chmod 700 "$store" "$store/private-keys-v1.d"
 
 GNUPGHOME=$home/.gnupg gpg --export | GNUPGHOME=$store gpg --batch --import
-mv "$home/.gnupg/private-keys-v1.d/"*.key "$store/private-keys-v1.d/"
 ```
 
-Starting from a key on the host instead, export the signing subkey rather than
-the whole key, so that the primary secret key stays where it is:
+Secret keys are files named after their keygrip, so find the keygrip of the
+subkey marked `[S]`:
+
+```sh
+GNUPGHOME=$home/.gnupg gpg --batch --with-keygrip --list-secret-keys
+```
+
+```
+sec#  ed25519 2026-09-06 [C]
+      3439A5CABF5879DAAC3C7BB91086289D4030DC33
+      Keygrip = 0A1B...
+ssb   ed25519 2026-09-06 [S]
+      Keygrip = EA9F7D57517960E522784F4E01F82D92EBBD9606     <- this one
+ssb   cv25519 2026-09-06 [E]
+      Keygrip = 5279...
+```
+
+Move that one, and only that one:
+
+```sh
+grip=EA9F7D57517960E522784F4E01F82D92EBBD9606
+mv "$home/.gnupg/private-keys-v1.d/$grip.key" "$store/private-keys-v1.d/"
+```
+
+The encryption and authentication subkeys should not stay behind in the
+container home either, since anything running there can use them directly and
+none of this applies to them. Move them somewhere the container cannot see if
+you still want them there, or delete them: they come back from the offline
+backup that holds the primary key.
+
+```sh
+ls -A "$home/.gnupg/private-keys-v1.d/"   # what is left
+rm "$home/.gnupg/private-keys-v1.d/"*.key
+```
+
+Starting from a key on the host instead, export the subkeys rather than the
+whole key, so that the primary secret key stays where it is:
 
 ```sh
 gpg --export YOUR_KEY_FINGERPRINT | GNUPGHOME=$store gpg --batch --import
@@ -434,9 +471,13 @@ gpg --export-secret-subkeys YOUR_KEY_FINGERPRINT |
 	GNUPGHOME=$store gpg --batch --import
 ```
 
+That exports every subkey, encryption and authentication included, so prune the
+store afterwards the same way: list the keygrips, keep the `[S]` one, delete the
+rest of the `.key` files.
+
 The AI container keeps the public half of the key in its own `~/.gnupg`, as
 `git` and `gpg` there still have to find the key they are asking a signature
-for. Only `private-keys-v1.d` moves.
+for. Only the secret half moves.
 
 ### 2. Store the passphrase in your keyring
 
@@ -489,6 +530,11 @@ points the container's `gpg` at it, and signing works.
   Use a signing subkey you can revoke on its own, not one you would mind
   rotating, and shorten `CONTAI_GPG_CACHE_TTL` if a week of standing signing
   rights is more than you want to grant.
+- **Whatever is in the store gets unlocked.** The sidecar presents the
+  passphrase for every signing-capable key whose secret half it holds, so an
+  encryption or authentication subkey left in there by accident would be usable
+  too, and a store with keys under different passphrases only works for one of
+  them. Keep it to the signing subkey.
 - **It is only as strong as your keyring.** If the Secret Service unlocks
   itself at login, as the GNOME Keyring `login` collection does by default, then
   anything running as you can read the passphrase and this buys little. It is
@@ -498,9 +544,9 @@ points the container's `gpg` at it, and signing works.
   listing of keygrips is one of the commands the restricted socket refuses.
   Signing is unaffected.
 
-To stop signing this way, run `contai-sidecar down gpg` and move
-`private-keys-v1.d` back, or leave the store in place and remove the passphrase
-from the keyring, which leaves the agent unable to unlock anything.
+To stop signing this way, run `contai-sidecar down gpg` and move the `.key` file
+back, or leave the store in place and remove the passphrase from the keyring,
+which leaves the agent unable to unlock anything.
 
 ## Known Issues
 
