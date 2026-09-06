@@ -5,7 +5,7 @@ set -eu
 # "<name>.Dockerfile" and the tag "contai-<name>:latest", and is what
 # contai-sidecar calls the service. Empty the list to build only contai
 # itself.
-sidecars='github-mcp'
+sidecars='github-mcp gpg'
 
 uid=${CONTAI_UID:-$(id -u)}
 username=${CONTAI_USER:-$(id -un)}
@@ -29,6 +29,19 @@ docker build \
 for sidecar in $sidecars
 do
 	set -- -t "contai-$sidecar:latest" -f "$sidecar.Dockerfile"
+
+	# A sidecar that touches the host's files runs as the host user and
+	# needs the same identity as the main image. The others declare no such
+	# build args, and docker warns about arguments nothing consumes.
+	case $sidecar in
+	gpg)
+		set -- "$@" \
+			--build-arg "UID=$uid" \
+			--build-arg "USERNAME=$username" \
+			--build-arg "GID=$gid" \
+			--build-arg "GROUPNAME=$groupname"
+		;;
+	esac
 
 	docker build "$@" .
 done

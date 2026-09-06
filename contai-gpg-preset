@@ -1,0 +1,129 @@
+#!/bin/sh
+set -eu
+
+# Puts the passphrase read from standard input into gpg-agent's cache, for
+# every signing key of the sidecar's store that does not have it yet.
+#
+# It has to go into the *restricted* cache, the one belonging to the extra
+# socket. gpg-agent keys every cache entry by the restricted flag of the
+# connection that created it, so a passphrase preset over the regular socket
+# is invisible to a client signing over the extra one, and that client would
+# be sent to a pinentry that does not exist here.
+#
+# With --check nothing is read and nothing is preset: the exit status alone
+# says whether a passphrase is still needed, which lets the caller leave the
+# keyring alone for as long as the cache stays warm.
+
+: "${CONTAI_GPG_EXTRA_SOCKET:=/run/contai-gpg/S.gpg-agent}"
+
+self=$(basename "$0")
+
+check=false
+
+if test "${1:-}" = "--check"
+then
+	check=true
+	shift
+fi
+
+if test $# -gt 0
+then
+	echo "usage: $self [--check]" >&2
+	exit 2
+fi
+
+home=$(gpgconf --list-dirs homedir)
+preset=$(gpgconf --list-dirs libexecdir)/gpg-preset-passphrase
+
+# The keygrip of every key that can sign. Capabilities are lowercase for what
+# the key itself does and uppercase for what the whole key can do, so matching
+# "s" leaves out the encryption-only subkeys: this store exists to sign, and a
+# passphrase that is never presented is one less thing that can leak.
+signing_keygrips() {
+	gpg --batch --with-colons --with-keygrip --list-secret-keys 2>/dev/null |
+		awk -F: '
+			$1 == "sec" || $1 == "ssb" { signs = index($12, "s") }
+			$1 == "grp" && signs { print $10 }
+		'
+}
+
+# Asking over the extra socket is what makes the answer meaningful: the
+# regular socket would report on its own cache, which is not the one signing
+# uses. A KEYINFO for a single keygrip is allowed there; its seventh field is
+# 1 when the passphrase is cached.
+is_cached() {
+	gpg-connect-agent --no-autostart -S "$CONTAI_GPG_EXTRA_SOCKET" \
+		"KEYINFO $1" /bye 2>/dev/null |
+		awk -v grip="$1" '
+			$1 == "S" && $2 == "KEYINFO" && $3 == grip {
+				cached = ($7 == "1")
+			}
+			END { exit !cached }
+		'
+}
+
+found=false
+pending=
+
+for grip in $(signing_keygrips)
+do
+	# A key listed but absent from the store is one whose secret half is
+	# kept offline, as a primary key usually is. There is nothing to unlock.
+	if ! test -f "$home/private-keys-v1.d/$grip.key"
+	then
+		continue
+	fi
+
+	found=true
+
+	if is_cached "$grip"
+	then
+		continue
+	fi
+
+	pending="$pending $grip"
+done
+
+if test "$found" = false
+then
+	echo "$self: no signing key found in $home" >&2
+	echo "$self: import the public half of the key there, gpg needs it to" >&2
+	echo "$self: list the secret keys it holds" >&2
+fi
+
+if test -z "$pending"
+then
+	exit 0
+fi
+
+if test "$check" = true
+then
+	exit 1
+fi
+
+# Command substitution drops the trailing newlines, which is what makes the
+# usual `secret-tool lookup ... | contai-gpg-preset` work either way. A
+# passphrase whose last character is a newline cannot be presented like this.
+passphrase=$(cat)
+
+if test -z "$passphrase"
+then
+	echo "$self: empty passphrase on standard input" >&2
+	exit 1
+fi
+
+status=0
+
+# --preset takes the passphrase on standard input, never as an argument,
+# where the whole machine could read it out of the process list.
+for grip in $pending
+do
+	if ! printf '%s' "$passphrase" |
+		"$preset" --restricted --preset "$grip" >/dev/null
+	then
+		echo "$self: could not preset the passphrase for $grip" >&2
+		status=1
+	fi
+done
+
+exit "$status"
