@@ -14,7 +14,7 @@ set -eu
 self=$(basename "$0")
 
 # In start order. Naming a service on the command line picks a subset.
-services='github-mcp'
+services='github-mcp gpg'
 
 warn() {
 	printf '%s: %s\n' "$self" "$1" >&2
@@ -67,6 +67,94 @@ github_mcp_opts() {
 	echo "--network=$github_mcp_net"
 }
 
+# --- gpg: the signing key, reachable only as "sign this" ------------------
+
+gpg_container=contai-gpg
+gpg_image=contai-gpg:latest
+gpg_volume=contai-gpg-sock
+
+# The restricted socket, as the sidecar and the AI container respectively see
+# it. The docker volume above is all they share.
+gpg_sidecar_socket_dir=/run/contai-gpg
+gpg_client_socket_dir=/run/contai/gpg
+
+# The secret keys, mounted into the gpg sidecar and into nothing else. The AI
+# container keeps only the public half of the key in its own home.
+gpg_home=~/.local/share/contai/gpg
+
+# How to retrieve the passphrase of the signing key from the Secret Service.
+: "${CONTAI_GPG_SECRET_CMD:=secret-tool lookup cli-id contai-gpg-secret}"
+# For how long gpg-agent holds on to a preset passphrase, in seconds.
+: "${CONTAI_GPG_CACHE_TTL:=604800}"
+
+gpg_start() {
+	# Enable knob: a key in the store means "on".
+	if ! gpg_has_secret_keys
+	then
+		warn "no secret keys in $gpg_home; gpg disabled"
+		return 1
+	fi
+
+	docker rm -f "$gpg_container" >/dev/null 2>&1 || true
+
+	# No network at all: the agent talks to nothing but the two sockets. The
+	# key store is the only bind mount, and the AI container never gets it.
+	docker run -d --name "$gpg_container" \
+		--network none --restart unless-stopped \
+		--cap-drop=ALL --security-opt=no-new-privileges \
+		--pids-limit 64 --memory 256m \
+		-e CONTAI_GPG_CACHE_TTL="$CONTAI_GPG_CACHE_TTL" \
+		-e CONTAI_GPG_EXTRA_SOCKET="$gpg_sidecar_socket_dir/S.gpg-agent" \
+		-v "$gpg_home:/gnupg" \
+		-v "$gpg_volume:$gpg_sidecar_socket_dir" \
+		"$gpg_image" >/dev/null
+}
+
+gpg_has_secret_keys() {
+	test -d "$gpg_home/private-keys-v1.d" || return 1
+	set -- "$gpg_home"/private-keys-v1.d/*.key
+	test -e "$1"
+}
+
+# Fill gpg-agent's passphrase cache, so that signing in the AI container needs
+# no pinentry it could not answer anyway. This runs on every "up", the already
+# running case included, so a cache that expired under a long-lived container
+# gets filled again.
+#
+# The passphrase travels through the pipe into `docker exec` and nowhere else:
+# not through a file, an environment variable or an argument, each of which
+# every other process of this user could read. The lookup is skipped entirely
+# while the cache is still warm, so a keyring that asks before handing the
+# secret over asks once per cache lifetime rather than once per contai run.
+gpg_prime() {
+	if docker exec "$gpg_container" contai-gpg-preset --check >/dev/null
+	then
+		return 0
+	fi
+
+	if ! secret=$(eval "$CONTAI_GPG_SECRET_CMD" 2>/dev/null) ||
+		test -z "$secret"
+	then
+		warn "no passphrase found; the gpg sidecar cannot sign"
+		return 1
+	fi
+
+	if ! printf '%s' "$secret" |
+		docker exec -i "$gpg_container" contai-gpg-preset
+	then
+		warn "could not preset the passphrase in the gpg sidecar"
+		return 1
+	fi
+
+	unset secret
+}
+
+gpg_opts() {
+	# Read-only: connecting to a socket needs no write permission on the
+	# mount, and there is nothing else in there to write to anyway.
+	echo "--volume=$gpg_volume:$gpg_client_socket_dir:ro"
+}
+
 # --- the generic part -----------------------------------------------------
 
 # Points the svc_* variables at the hooks of one service. Every action below
@@ -80,6 +168,12 @@ select_service() {
 		svc_container=$github_mcp_container
 		svc_start=github_mcp_start
 		svc_opts=github_mcp_opts
+		;;
+	gpg)
+		svc_container=$gpg_container
+		svc_start=gpg_start
+		svc_prime=gpg_prime
+		svc_opts=gpg_opts
 		;;
 	*)
 		warn "unknown sidecar: $1"
