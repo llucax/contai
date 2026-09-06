@@ -8,6 +8,9 @@ fi
 
 tool=
 
+# Where contai mounts the socket volume of the gpg sidecar, when it runs.
+gpg_socket=/run/contai/gpg/S.gpg-agent
+
 if test $# -gt 0
 then
 	tool=$1
@@ -76,7 +79,58 @@ enable_rtk_copilot() {
 	fi
 }
 
+enable_gpg() {
+	if ! test -S "$gpg_socket"
+	then
+		return
+	fi
+
+	if ! command -v gpg >/dev/null 2>&1
+	then
+		printf 'contai: gpg not found, ignoring the gpg sidecar\n' >&2
+		return
+	fi
+
+	mkdir -p "$HOME/.gnupg"
+	chmod 700 "$HOME/.gnupg"
+
+	# gpg looks for the agent in its socket directory, which is the GnuPG
+	# home here and /run/user/<uid>/gnupg wherever that directory exists, so
+	# ask instead of assuming, and clean up after both.
+	socket_dir=$(gpgconf --list-dirs socketdir 2>/dev/null) || socket_dir=
+
+	if test -z "$socket_dir"
+	then
+		socket_dir=$HOME/.gnupg
+	fi
+
+	if ! mkdir -p "$socket_dir" 2>/dev/null
+	then
+		printf 'contai: cannot create %s for the gpg agent socket\n' \
+			"$socket_dir" >&2
+		return
+	fi
+
+	rm -f "$HOME/.gnupg"/S.gpg-agent* "$socket_dir"/S.gpg-agent*
+
+	# A redirection file rather than a socket: libassuan reads it, sees a
+	# regular file, and connects to the socket it names. That is how the
+	# agent of another container is reached without the client having to
+	# know anything about it. Both lines end in a single newline, and
+	# nothing else may be in the file.
+	printf '%%Assuan%%\nsocket=%s\n' "$gpg_socket" >"$socket_dir/S.gpg-agent"
+
+	# Without this, a gpg that fails to reach the sidecar starts an agent of
+	# its own instead, and that one holds no keys, so the failure would
+	# surface much later as a puzzling "No secret key".
+	if ! grep -qs '^no-autostart' "$HOME/.gnupg/gpg.conf"
+	then
+		printf 'no-autostart\n' >>"$HOME/.gnupg/gpg.conf"
+	fi
+}
+
 enable_rtk
+enable_gpg
 
 if test -n "$tool"
 then
