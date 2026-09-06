@@ -1,0 +1,63 @@
+#!/bin/sh
+set -eu
+
+# Entry point of the contai gpg sidecar: a gpg-agent holding the secret keys,
+# of which the AI container gets to see one thing only, the extra socket.
+#
+# gpg-agent serves that socket in restricted mode, where it signs and decrypts
+# but refuses EXPORT_KEY, IMPORT_KEY, DELETE_KEY, PASSWD and PRESET_PASSPHRASE
+# among others, so a client on the far end can use the key without ever being
+# able to take a copy of it or change what protects it.
+
+: "${CONTAI_GPG_CACHE_TTL:=604800}"
+: "${CONTAI_GPG_EXTRA_SOCKET:=/run/contai-gpg/S.gpg-agent}"
+
+socket_dir=$(dirname "$CONTAI_GPG_EXTRA_SOCKET")
+
+# The socket volume takes its ownership from the image directory it is first
+# mounted over, so a volume left behind by an older image can be owned by
+# somebody else, and nothing here runs as root to repair it.
+if ! test -w "$socket_dir"
+then
+	echo "contai-gpg: $socket_dir is not writable by $(id -un)" >&2
+	echo "contai-gpg: remove the stale socket volume and start again:" >&2
+	echo "contai-gpg:   contai-sidecar down gpg" >&2
+	echo "contai-gpg:   docker volume rm contai-gpg-sock" >&2
+	exit 1
+fi
+
+# shellcheck disable=SC2317  # reached through the trap right below
+stop() {
+	gpgconf --kill gpg-agent >/dev/null 2>&1 || true
+	exit 0
+}
+
+trap stop INT TERM
+
+# Only max-cache-ttl matters here: gpg-preset-passphrase asks for an entry
+# that never expires on its own, and this is the cap that still applies to it.
+# default-cache-ttl governs passphrases typed into a pinentry, and there is no
+# pinentry in this image, on purpose: a passphrase this agent was not given
+# beforehand is one it cannot obtain, and signing fails loudly instead.
+#
+# gpg-agent forks even with --no-detach, so it cannot be the container's main
+# process: this call returns as soon as the real agent is up. Sit here for as
+# long as it answers, so that docker restarts the container when the agent
+# dies rather than the moment it starts.
+gpg-agent --daemon --no-detach \
+	--disable-scdaemon \
+	--allow-preset-passphrase \
+	--max-cache-ttl "$CONTAI_GPG_CACHE_TTL" \
+	--extra-socket "$CONTAI_GPG_EXTRA_SOCKET"
+
+# Sleeping in the background and waiting for it keeps the trap responsive:
+# a shell running `sleep` in the foreground would only act on the signal once
+# the sleep is over, and docker would have killed the container by then.
+while gpg-connect-agent --no-autostart /bye >/dev/null 2>&1
+do
+	sleep 30 &
+	wait "$!" || true
+done
+
+echo "contai-gpg: gpg-agent is gone" >&2
+exit 1
