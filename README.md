@@ -32,6 +32,10 @@ system (i.e. normal people).
 - **Isolated GitHub MCP (optional)**: Optionally exposes the official GitHub MCP
   server to the AI tools from a separate, hardened sidecar, so your GitHub token
   never enters the tool's container (see the GitHub MCP Server section below)
+- **GPG Commit Signing (optional)**: Optionally signs commits through a
+  `gpg-agent` running in its own sidecar, so the secret key and its passphrase
+  stay outside the AI tool's container and all it can ask for is a signature
+  (see the GPG Commit Signing section below)
 
 ## Requirements
 
@@ -49,7 +53,10 @@ To build the container image:
 ```
 
 This will create a Docker image tagged as `contai:latest` with your host user's
-UID/GID for proper file permissions.
+UID/GID for proper file permissions, plus one image per optional sidecar
+(`contai-github-mcp:latest` and `contai-gpg:latest`). Trim the `sidecars` list
+at the top of `build.sh` to build fewer of them; an image you never build is
+simply a sidecar that never starts.
 
 To override the account created in the image, set `CONTAI_UID`, `CONTAI_USER`,
 `CONTAI_GID`, `CONTAI_GROUP`, and/or `CONTAI_HOME` when building:
@@ -73,9 +80,10 @@ After building, you can install `contai` to your PATH:
 # Create a bin directory in your home (if it doesn't exist)
 mkdir -p ~/bin
 
-# Copy the contai script (plus contai-mcp if you want the isolated GitHub MCP
-# server described below; it must sit next to contai in your PATH)
-cp contai contai-mcp ~/bin/
+# Copy the contai script (plus contai-sidecar if you want the GitHub MCP
+# server or the GPG signing agent described below; it must sit next to contai
+# in your PATH)
+cp contai contai-sidecar ~/bin/
 
 # Make sure ~/bin is in your PATH (add to ~/.bashrc or ~/.zshrc if needed)
 export PATH="$HOME/bin:$PATH"
@@ -307,8 +315,9 @@ By default `contai` looks the token up with
 Use a least-privilege, fine-grained PAT (limit it to the repositories and
 permissions you actually need) — the token's scope is the blast radius.
 
-To stop using the MCP, remove the secret (or run `contai-mcp down`). To skip the
-keyring lookup entirely, export `CONTAI_MCP_PAT_CMD=false`.
+To stop using the MCP, remove the secret (or run `contai-sidecar down
+github-mcp`). To skip the keyring lookup entirely, export
+`CONTAI_MCP_PAT_CMD=false`.
 
 ### 2. Wire opencode to the MCP
 
@@ -364,7 +373,7 @@ sidecar read-only instead (`CONTAI_MCP_READONLY=1`, see below).
 | `CONTAI_MCP_PAT_CMD`   | `secret-tool lookup service github-mcp` | PAT lookup command; also the de-facto enable switch (set to `false` to disable lookups) |
 | `CONTAI_MCP_TOOLSETS`  | `all`                                   | GitHub toolsets to expose; trim for context/token budget                              |
 | `CONTAI_MCP_READONLY`  | unset (read-write)                      | Set to any value for a hard, server-side read-only guarantee                          |
-| `build_mcp` (build.sh) | `true`                                  | Set to `false` to skip building the sidecar image                                     |
+| `sidecars` (build.sh)  | `github-mcp gpg`                        | Drop `github-mcp` to skip building the sidecar image                                  |
 
 ### Security properties
 
@@ -378,6 +387,120 @@ sidecar read-only instead (`CONTAI_MCP_READONLY=1`, see below).
   rootfs + tmpfs, non-root user, and pids/memory limits.
 - For the strongest write protection, run the sidecar read-only with
   `CONTAI_MCP_READONLY=1` rather than relying on opencode's permission prompts.
+
+## GPG Commit Signing
+
+If your projects require signed commits, `contai` can sign them **without** the
+secret key or its passphrase ever being inside the AI tool's container. The key
+lives in a second sidecar (`contai-gpg`) running nothing but a `gpg-agent`, and
+the tool container reaches that agent through a single socket shared in a Docker
+volume.
+
+That socket is `gpg-agent`'s *extra socket*, which the agent serves in
+restricted mode. Restricted is not a contai policy but a `gpg-agent` one:
+signing and decryption go through, while `EXPORT_KEY`, `IMPORT_KEY`,
+`DELETE_KEY`, `PASSWD` and `PRESET_PASSPHRASE` are refused. In practice
+`git commit -S` works inside the container and `gpg --export-secret-keys` there
+answers `Forbidden`.
+
+Like the MCP, the sidecar has **no on/off switch**: it starts when its key store
+holds a secret key, and stays down otherwise.
+
+### 1. Move the signing key into the sidecar's store
+
+The store is `~/.local/share/contai/gpg`, and it is mounted into the gpg sidecar
+and into nothing else. It needs the secret key and the public half of it, which
+is what `gpg` reads in order to know which secret keys it has at all.
+
+Coming from a key that already sits in the container home:
+
+```sh
+store=~/.local/share/contai/gpg
+home=~/.local/share/contai/home
+
+mkdir -p "$store/private-keys-v1.d"
+chmod 700 "$store" "$store/private-keys-v1.d"
+
+GNUPGHOME=$home/.gnupg gpg --export | GNUPGHOME=$store gpg --batch --import
+mv "$home/.gnupg/private-keys-v1.d/"*.key "$store/private-keys-v1.d/"
+```
+
+Starting from a key on the host instead, export the signing subkey rather than
+the whole key, so that the primary secret key stays where it is:
+
+```sh
+gpg --export YOUR_KEY_FINGERPRINT | GNUPGHOME=$store gpg --batch --import
+gpg --export-secret-subkeys YOUR_KEY_FINGERPRINT |
+	GNUPGHOME=$store gpg --batch --import
+```
+
+The AI container keeps the public half of the key in its own `~/.gnupg`, as
+`git` and `gpg` there still have to find the key they are asking a signature
+for. Only `private-keys-v1.d` moves.
+
+### 2. Store the passphrase in your keyring
+
+```sh
+secret-tool store --label='contai GPG signing key' cli-id contai-gpg-secret
+```
+
+With KeePassXC, add a custom attribute `cli-id=contai-gpg-secret` to the entry
+and enable KeePassXC's Secret Service integration.
+
+`contai` presets that passphrase into the agent's restricted cache on every
+launch, but only when the cache has run dry, so a keyring that asks before
+handing a secret over asks once per cache lifetime rather than once per run.
+The passphrase travels through a pipe into `docker exec` and nowhere else: not
+through a file, an environment variable, or a command line, each of which every
+other process of your user could read.
+
+### 3. Point the container's git at the key
+
+```sh
+home=~/.local/share/contai/home
+HOME=$home git config --global user.signingkey YOUR_KEY_FINGERPRINT
+HOME=$home git config --global commit.gpgsign true
+```
+
+That is all. On the next `contai` run the sidecar comes up, `contai-bootstrap`
+points the container's `gpg` at it, and signing works.
+
+### Configuration knobs
+
+| Variable / setting        | Default                                       | Effect                                                                |
+|---------------------------|-----------------------------------------------|-----------------------------------------------------------------------|
+| `CONTAI_GPG_SECRET_CMD`   | `secret-tool lookup cli-id contai-gpg-secret` | Passphrase lookup command (set to `false` to never look one up)       |
+| `CONTAI_GPG_CACHE_TTL`    | `604800` (a week)                             | For how long the agent keeps the passphrase before it must be preset again |
+| `sidecars` (build.sh)     | `github-mcp gpg`                              | Drop `gpg` to skip building the sidecar image                         |
+
+### What this protects, and what it does not
+
+- **The key does not leave the sidecar.** The store is bind-mounted into the
+  gpg sidecar alone, and the restricted socket refuses every command that would
+  hand a copy of the key out or change what protects it. Verify it yourself
+  from inside the container: `gpg --export-secret-keys` fails with `Forbidden`.
+- **The sidecar reaches nothing.** It runs with `--network none`,
+  `--cap-drop=ALL`, `--security-opt=no-new-privileges`, and no bind mount other
+  than the key store. There is no pinentry in the image either, so a passphrase
+  it was not given beforehand is one it cannot be tricked into asking for.
+- **It is not a boundary against the tool signing things.** For as long as the
+  passphrase is cached, whatever runs in the container can have anything signed
+  with that key, commits included. What it cannot do is take the key with it.
+  Use a signing subkey you can revoke on its own, not one you would mind
+  rotating, and shorten `CONTAI_GPG_CACHE_TTL` if a week of standing signing
+  rights is more than you want to grant.
+- **It is only as strong as your keyring.** If the Secret Service unlocks
+  itself at login, as the GNOME Keyring `login` collection does by default, then
+  anything running as you can read the passphrase and this buys little. It is
+  worth the most with a backend that locks on its own, such as KeePassXC.
+- **`gpg` in the container is noisier.** Listing keys prints
+  `problem with fast path key listing: Forbidden - ignored`, because the bulk
+  listing of keygrips is one of the commands the restricted socket refuses.
+  Signing is unaffected.
+
+To stop signing this way, run `contai-sidecar down gpg` and move
+`private-keys-v1.d` back, or leave the store in place and remove the passphrase
+from the keyring, which leaves the agent unable to unlock anything.
 
 ## Known Issues
 
