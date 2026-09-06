@@ -19,19 +19,22 @@ contai/
 ├── README.md              # Project documentation
 ├── Dockerfile             # Container definition with dev tools
 ├── github-mcp.Dockerfile  # Isolated GitHub MCP sidecar image definition
-├── build.sh               # Build script (builds both images)
+├── gpg.Dockerfile         # GPG signing agent sidecar image definition
+├── build.sh               # Build script (builds the main and sidecar images)
 ├── contai                 # Container runner script
-├── contai-bootstrap       # Runtime container bootstrap for RTK setup
-├── contai-mcp             # Host script managing the GitHub MCP sidecar
+├── contai-bootstrap       # Runtime container bootstrap for RTK and GPG setup
+├── contai-sidecar         # Host script managing every sidecar
+├── contai-gpg-agent       # Entry point of the GPG sidecar image
+├── contai-gpg-preset      # Passphrase priming helper, GPG sidecar image only
 └── agent-instructions.md  # Global agent instructions for end users
 ```
 
 ## Build Commands
 
-| Command      | Description                                              |
-|--------------|----------------------------------------------------------|
-| `./build.sh` | Builds `contai:latest` and `contai-github-mcp:latest`    |
-| `./contai`   | Runs the container with current directory mounted        |
+| Command      | Description                                                              |
+|--------------|--------------------------------------------------------------------------|
+| `./build.sh` | Builds `contai:latest` plus one image per name in its `sidecars` list     |
+| `./contai`   | Runs the container with current directory mounted                        |
 
 ### Building the Container
 
@@ -41,8 +44,11 @@ contai/
 
 The build script passes host UID/GID to ensure proper file permissions inside the container.
 
-It also builds the optional `contai-github-mcp:latest` sidecar image (the
-isolated GitHub MCP server). Set `build_mcp=false` in `build.sh` to skip it.
+It also builds one image per name in the `sidecars` list at the top of
+`build.sh`: `<name>.Dockerfile` becomes `contai-<name>:latest`, which is what
+`contai-sidecar` looks for. Trim the list to skip a sidecar. Only the sidecars
+that touch host files get the UID/GID build args, since docker warns about
+build args nothing consumes.
 
 ### Running the Container
 
@@ -61,7 +67,13 @@ This project has no test suite. Changes should be verified by:
 5. Verifying binary-installed tools work: `./contai rtk --version`
 6. Verifying RTK bootstrap writes the expected runtime config for shipped tools
 7. Verifying the GitHub MCP sidecar starts when a PAT is available
-   (`contai-mcp status`) and that `./contai` joins the `contai-net` network
+   (`contai-sidecar status github-mcp`) and that `./contai` joins the
+   `contai-net` network
+8. Verifying the GPG sidecar starts when its store holds a key
+   (`contai-sidecar status gpg`), that the passphrase is cached
+   (`docker exec contai-gpg contai-gpg-preset --check` succeeds), that
+   `./contai git commit -S` produces a good signature, and that
+   `./contai gpg --export-secret-keys` is refused with `Forbidden`
 
 ## Linting
 
@@ -71,9 +83,15 @@ No project-level linting is configured. However, the container includes these to
 
 To lint shell scripts locally (if shellcheck is installed):
 ```sh
-shellcheck build.sh contai contai-bootstrap contai-mcp
-shfmt -d build.sh contai contai-bootstrap contai-mcp
+shellcheck build.sh contai contai-bootstrap contai-sidecar \
+	contai-gpg-agent contai-gpg-preset
+shfmt -d build.sh contai contai-bootstrap contai-sidecar \
+	contai-gpg-agent contai-gpg-preset
 ```
+
+`shfmt` with default options wants `then` on the same line as `if`, which is
+not the style used here, so it reports every script. Read its output for the
+rest, not for that.
 
 ## Code Style Guidelines
 
@@ -226,31 +244,79 @@ The container uses these host directories:
 - `~/.local/share/contai/env.list`: Environment variables for container
 - `~/.local/share/contai/docker-run-opts.list`: Extra `docker run` options, one
   argument per line, appended after contai's own (see README.md)
+- `~/.local/share/contai/gpg`: GnuPG home of the GPG sidecar, holding the secret
+  keys. Mounted into that sidecar and never into the AI container
 
-## GitHub MCP Sidecar
+There is also one Docker volume, `contai-gpg-sock`, carrying the restricted
+`gpg-agent` socket from the GPG sidecar to the AI container. It takes its
+ownership from `/run/contai-gpg` in `gpg.Dockerfile` the first time it is
+mounted, so a volume left over from an older image has to be removed rather
+than reused.
+
+## Sidecars
+
+A sidecar is a separate container holding something the AI container must not
+hold itself, and reachable from it through one narrow channel. `contai-sidecar`
+manages all of them (`up`/`down`/`status`/`opts`), one service per block in the
+script plus a name in its `services` list. Each block defines a container name,
+a start hook that refuses when the service is not configured, a prime hook run
+after every `up`, and an opts hook printing the `docker run` options the AI
+container needs to reach it.
+
+`contai` calls `contai-sidecar up` on every launch and then appends the output
+of `contai-sidecar opts` to its own `docker run` options, so nothing about a
+particular sidecar is hardcoded there. Their diagnostics are discarded, since
+running without a sidecar is the normal case; run `contai-sidecar up` by hand to
+see why one stayed down.
+
+### github-mcp
 
 `github-mcp.Dockerfile` builds `contai-github-mcp:latest`, a hardened sidecar
 that bridges the official `github-mcp-server` (stdio) to an unauthenticated
-Streamable HTTP endpoint via `supergateway`. The host script `contai-mcp`
-manages its lifecycle (`up`/`down`/`status`).
+Streamable HTTP endpoint via `supergateway`.
 
-Runtime behavior, wired from `contai`:
-- `contai` calls `contai-mcp up` on every launch. The sidecar starts only when a
-  PAT is retrievable (default: `secret-tool lookup service github-mcp`); no PAT
-  means no sidecar and unchanged behavior.
-- When the sidecar is running, `contai` attaches the opencode container to the
-  private `contai-net` network so it can reach
-  `http://contai-github-mcp:8082/mcp`.
+- It starts only when a PAT is retrievable (default:
+  `secret-tool lookup service github-mcp`); no PAT means no sidecar and
+  unchanged behavior.
+- While it runs, `contai` attaches the AI container to the private `contai-net`
+  network so it can reach `http://contai-github-mcp:8082/mcp`.
 - The PAT lives only in the sidecar's environment (passed to Docker by name, not
-  value). It never enters `env.list`, the opencode container, argv, or disk.
-- The sidecar runs with no host bind mounts, no published ports, `--cap-drop=ALL`,
+  value). It never enters `env.list`, the AI container, argv, or disk.
+- It runs with no host bind mounts, no published ports, `--cap-drop=ALL`,
   `--security-opt=no-new-privileges`, read-only rootfs, and pids/memory limits.
 - contai ships no opencode configuration; wiring opencode to the MCP and any
   write-gating policy is the user's choice (see README.md).
 
 Knobs: `CONTAI_MCP_PAT_CMD` (lookup command / enable), `CONTAI_MCP_TOOLSETS`
-(default `all`), `CONTAI_MCP_READONLY` (set = read-only), and `build_mcp` in
-`build.sh`.
+(default `all`), `CONTAI_MCP_READONLY` (set = read-only).
+
+### gpg
+
+`gpg.Dockerfile` builds `contai-gpg:latest`, a `gpg-agent` holding the secret
+keys. Its two scripts, `contai-gpg-agent` and `contai-gpg-preset`, live in that
+image only and are not installed on the host.
+
+- It starts only when `~/.local/share/contai/gpg/private-keys-v1.d` holds a key.
+- The AI container sees the agent through its *extra* socket, which `gpg-agent`
+  serves in restricted mode: `PKSIGN` and `PKDECRYPT` work there, `EXPORT_KEY`,
+  `IMPORT_KEY`, `DELETE_KEY`, `PASSWD` and `PRESET_PASSPHRASE` are refused. That
+  restriction is `gpg-agent`'s own, not something contai enforces.
+- `contai-bootstrap` writes a libassuan `%Assuan%` redirection file at
+  `$(gpgconf --list-dirs socketdir)/S.gpg-agent` pointing at the mounted socket,
+  and adds `no-autostart` to `~/.gnupg/gpg.conf` so a failure to reach the
+  sidecar is loud instead of silently starting a keyless local agent.
+- Priming happens on every `up`, including when the container was already
+  running, so an expired cache is refilled. `contai-gpg-preset --check` decides
+  whether a keyring lookup is needed at all.
+- The passphrase must go into the agent's *restricted* cache
+  (`gpg-preset-passphrase --restricted`): `gpg-agent` keys every cache entry by
+  the restricted flag of the connection that made it, so an entry preset over
+  the regular socket is invisible to a client signing over the extra one.
+- Only `--max-cache-ttl` matters for preset entries; `--default-cache-ttl`
+  governs passphrases typed into a pinentry, and the image ships none.
+
+Knobs: `CONTAI_GPG_SECRET_CMD` (lookup command / enable),
+`CONTAI_GPG_CACHE_TTL` (default a week).
 
 ## Adding New Features
 
@@ -287,7 +353,16 @@ this AGENTS.md file to reflect those changes.
 ### Updating the GitHub MCP Server Version
 1. Bump the pinned `ghcr.io/github/github-mcp-server:<tag>` in `github-mcp.Dockerfile`
 2. Rebuild: `./build.sh`
-3. Recreate the sidecar: `contai-mcp down` (the next `./contai` recreates it)
+3. Recreate the sidecar: `contai-sidecar down github-mcp` (the next `./contai`
+   recreates it)
+
+### Adding a Sidecar
+1. Write `<name>.Dockerfile` and add `<name>` to `sidecars` in `build.sh`
+2. Add a block to `contai-sidecar` defining the container name and the start,
+   prime and opts hooks, then add `<name>` to its `services` list
+3. If the AI container needs anything at runtime to use it, put that in
+   `contai-bootstrap`, keyed off whatever the opts hook mounts
+4. Document it in README.md and in the Sidecars section above
 
 ### Debugging Container Issues
 ```sh
