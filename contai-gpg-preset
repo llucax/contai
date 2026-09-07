@@ -13,6 +13,12 @@ set -eu
 # With --check nothing is read and nothing is preset: the exit status alone
 # says whether a passphrase is still needed, which lets the caller leave the
 # keyring alone for as long as the cache stays warm.
+#
+# Exit status, for --check and for a real run alike:
+#   0  every signing key in the store already has its passphrase
+#   1  at least one of them wants it
+#   2  called wrongly
+#   3  there is no signing key here to preset a passphrase for
 
 : "${CONTAI_GPG_EXTRA_SOCKET:=/run/contai-gpg/S.gpg-agent}"
 
@@ -84,11 +90,15 @@ do
 	pending="$pending $grip"
 done
 
+# Not the same as having nothing left to do, however much it looks like it from
+# here: a store with no signing key in it can never sign, and answering "warm"
+# would leave the caller pleased with a sidecar that is useless.
 if test "$found" = false
 then
 	echo "$self: no signing key found in $home" >&2
 	echo "$self: import the public half of the key there, gpg needs it to" >&2
 	echo "$self: list the secret keys it holds" >&2
+	exit 3
 fi
 
 if test -z "$pending"
