@@ -318,7 +318,9 @@ image only and are not installed on the host.
   sidecar is loud instead of silently starting a keyless local agent.
 - Priming happens on every `up`, including when the container was already
   running, so an expired cache is refilled. `contai-gpg-preset --check` decides
-  whether a keyring lookup is needed at all.
+  whether a keyring lookup is needed at all: 0 when the cache is warm, 1 when a
+  passphrase is wanted, 3 when the store holds no signing key and no passphrase
+  could help.
 - The passphrase must go into the agent's *restricted* cache
   (`gpg-preset-passphrase --restricted`): `gpg-agent` keys every cache entry by
   the restricted flag of the connection that made it, so an entry preset over

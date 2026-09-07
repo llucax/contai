@@ -183,10 +183,25 @@ gpg_wait_for_agent() {
 # while the cache is still warm, so a keyring that asks before handing the
 # secret over asks once per cache lifetime rather than once per contai run.
 gpg_prime() {
-	if docker exec "$gpg_container" contai-gpg-preset --check >/dev/null
-	then
+	status=0
+	docker exec "$gpg_container" contai-gpg-preset --check >/dev/null ||
+		status=$?
+
+	case $status in
+	0)
+		# Nothing to do, and nobody had to be asked for a secret.
 		return 0
-	fi
+		;;
+	1)
+		# A passphrase is wanted, so go and get it.
+		;;
+	*)
+		# Nothing here could take one. Whatever the reason, the sidecar
+		# has just explained it, and asking the keyring for a secret
+		# that has nowhere to go would only add a pointless prompt.
+		return 1
+		;;
+	esac
 
 	if ! secret=$(eval "$CONTAI_GPG_SECRET_CMD" 2>/dev/null) ||
 		test -z "$secret"
