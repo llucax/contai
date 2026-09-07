@@ -34,6 +34,14 @@ stop() {
 
 trap stop INT TERM
 
+# Ask the socket that matters, the one the AI container will use. The standard
+# socket answering proves much less: anything holding it would do, including an
+# agent this script did not start.
+agent_answers() {
+	gpg-connect-agent --no-autostart -S "$CONTAI_GPG_EXTRA_SOCKET" /bye \
+		>/dev/null 2>&1
+}
+
 # Only max-cache-ttl matters here: gpg-preset-passphrase asks for an entry
 # that never expires on its own, and this is the cap that still applies to it.
 # default-cache-ttl governs passphrases typed into a pinentry, and there is no
@@ -44,16 +52,36 @@ trap stop INT TERM
 # process: this call returns as soon as the real agent is up. Sit here for as
 # long as it answers, so that docker restarts the container when the agent
 # dies rather than the moment it starts.
-gpg-agent --daemon --no-detach \
+# It also starts nothing and fails when something else is already holding the
+# standard socket of this GnuPG home. That other agent has none of the options
+# above, so it would refuse every preset passphrase, and there would be no
+# extra socket at all.
+if ! gpg-agent --daemon --no-detach \
 	--disable-scdaemon \
 	--allow-preset-passphrase \
 	--max-cache-ttl "$CONTAI_GPG_CACHE_TTL" \
 	--extra-socket "$CONTAI_GPG_EXTRA_SOCKET"
+then
+	echo "contai-gpg: gpg-agent would not start" >&2
+	echo "contai-gpg: check what is holding" >&2
+	echo "contai-gpg:   $(gpgconf --list-dirs socketdir)/S.gpg-agent" >&2
+	exit 1
+fi
+
+# Ask the socket that matters before settling in to watch it, so that an agent
+# which came up without the extra socket is a container that fails while the
+# reason is still legible, rather than one reporting itself healthy.
+if ! agent_answers
+then
+	echo "contai-gpg: gpg-agent started but nothing answers on" >&2
+	echo "contai-gpg:   $CONTAI_GPG_EXTRA_SOCKET" >&2
+	exit 1
+fi
 
 # Sleeping in the background and waiting for it keeps the trap responsive:
 # a shell running `sleep` in the foreground would only act on the signal once
 # the sleep is over, and docker would have killed the container by then.
-while gpg-connect-agent --no-autostart /bye >/dev/null 2>&1
+while agent_answers
 do
 	sleep 30 &
 	wait "$!" || true
