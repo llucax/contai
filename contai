@@ -84,7 +84,9 @@ done < "$run_opts_file"
 
 cmd=(contai:latest /usr/local/bin/contai-bootstrap)
 
-if test -n "$tool"; then
+if test -n "$tool"
+then
+	echo $tool
 	cmd+=("$tool")
 fi
 
