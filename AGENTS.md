@@ -17,7 +17,8 @@ Read README.md for complete project documentation including features and usage.
 contai/
 ├── .editorconfig          # shfmt/editor settings
 ├── .github/dependabot.yml # Weekly bumps of actions, hooks and pre-commit
-├── .github/workflows/     # CI: the pre-commit hooks, reported via reviewdog
+├── .github/shellcheck-matcher.json  # CI: shellcheck output to annotations
+├── .github/workflows/     # CI: the pre-commit hooks, reported as annotations
 ├── .pre-commit-config.yaml  # shfmt and shellcheck hooks, pinned
 ├── AGENTS.md              # This file - AI agent instructions
 ├── README.md              # Project documentation
@@ -67,8 +68,8 @@ Shell scripts are checked by `shellcheck` and formatted by `shfmt`, both run
 through [pre-commit](https://pre-commit.com/). `.pre-commit-config.yaml` pins
 the version of each tool, and `shfmt` takes its settings from
 `.editorconfig`. CI runs the same hooks on every pull request, via
-`.github/workflows/lint.yml`, reporting inline through reviewdog. To check and
-fix locally:
+`.github/workflows/lint.yml`, reporting findings inline as annotations. To
+check and fix locally:
 
 ```sh
 uv tool install -c requirements-pre-commit.txt pre-commit  # once, and after bumps
@@ -259,7 +260,9 @@ When modifying this project:
 6. **GitHub Actions**: pin every action to a full commit hash, with a trailing
    comment naming the version it resolves to, as in
    `uses: actions/checkout@3d3c42e... # v7.0.1`. Tags and branches can be
-   moved to point at other code after review, so a tag is not a pin
+   moved to point at other code after review, so a tag is not a pin. Never
+   write a version number into an action input, such as `reviewdog_version`:
+   Dependabot only bumps the `uses:` line, so the number would never move
 
 Automatic RTK initialization always sets `RTK_TELEMETRY_DISABLED` to `1` so it
 cannot block on a first-run consent prompt. Users can opt in separately with
