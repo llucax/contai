@@ -16,6 +16,7 @@ Read README.md for complete project documentation including features and usage.
 ```
 contai/
 ├── .editorconfig          # shfmt/editor settings
+├── .github/dependabot.yml # Weekly bumps of actions, hooks and pre-commit
 ├── .github/workflows/     # CI: the pre-commit hooks, reported via reviewdog
 ├── .pre-commit-config.yaml  # shfmt and shellcheck hooks, pinned
 ├── AGENTS.md              # This file - AI agent instructions
@@ -78,6 +79,10 @@ pre-commit install  # optional, to run the hooks on every commit
 The `shfmt` hook fixes files in place, so a failure means `git diff` has the
 fix. Do not hand-format against it: what `shfmt` produces is the house style
 by definition.
+
+Dependabot bumps the hooks, pre-commit and the actions. A `shfmt` bump that
+formats differently fails its own pull request: add the reformatting to it,
+as a separate commit, before merging.
 
 pre-commit finds the extensionless scripts by their shebang, but only when
 they are executable: commit a new one with `chmod +x`, or it is silently
