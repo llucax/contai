@@ -16,6 +16,7 @@ Read README.md for complete project documentation including features and usage.
 ```
 contai/
 ├── .editorconfig          # shfmt/editor settings
+├── .github/workflows/     # CI: the pre-commit hooks, reported via reviewdog
 ├── .pre-commit-config.yaml  # shfmt and shellcheck hooks, pinned
 ├── AGENTS.md              # This file - AI agent instructions
 ├── README.md              # Project documentation
@@ -64,7 +65,9 @@ This project has no test suite. Changes should be verified by:
 Shell scripts are checked by `shellcheck` and formatted by `shfmt`, both run
 through [pre-commit](https://pre-commit.com/). `.pre-commit-config.yaml` pins
 the version of each tool, and `shfmt` takes its settings from
-`.editorconfig`. To check and fix locally:
+`.editorconfig`. CI runs the same hooks on every pull request, via
+`.github/workflows/lint.yml`, reporting inline through reviewdog. To check and
+fix locally:
 
 ```sh
 pip install -r requirements-pre-commit.txt  # once, in a virtualenv
@@ -248,6 +251,10 @@ When modifying this project:
 4. **New system tools**: Add to apt-get install section in Dockerfile
 5. **Runtime tool initialization**: Keep startup logic in `contai-bootstrap`
    when it depends on the mounted container home or current project
+6. **GitHub Actions**: pin every action to a full commit hash, with a trailing
+   comment naming the version it resolves to, as in
+   `uses: actions/checkout@3d3c42e... # v7.0.1`. Tags and branches can be
+   moved to point at other code after review, so a tag is not a pin
 
 Automatic RTK initialization always sets `RTK_TELEMETRY_DISABLED` to `1` so it
 cannot block on a first-run consent prompt. Users can opt in separately with

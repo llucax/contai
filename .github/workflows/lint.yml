@@ -1,0 +1,71 @@
+name: Lint
+
+on:
+  pull_request:
+
+# Findings are reported only as annotations, which GitHub shows in the Checks
+# tab and next to the offending lines, so nothing here may write to the pull
+# request. reviewdog only needs to read its diff.
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  lint:
+    name: shfmt and shellcheck
+    runs-on: ubuntu-26.04
+    defaults:
+      run:
+        # Unlike the implicit default, an explicit bash adds -o pipefail, so
+        # a tool failing in front of reviewdog fails the step.
+        shell: bash
+    env:
+      REVIEWDOG_GITHUB_API_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install pre-commit
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -r requirements-pre-commit.txt
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+
+      - uses: reviewdog/action-setup@d8a7baabd7f3e8544ee4dbde3ee41d0011c3a93f # v1.5.0
+        with:
+          # Its default is the latest release.
+          reviewdog_version: v0.21.2
+
+      # Kept apart, so the installation log doesn't end up mixed with the
+      # findings.
+      - name: Install hooks
+        run: pre-commit install-hooks
+
+      # Every reviewdog call below reports on the whole tree, not only the
+      # lines the pull request touches, as the tree is clean and keeping it so
+      # is cheap, and fails on any finding, as shellcheck reports most of them
+      # as warnings or notes.
+
+      # Before shfmt, which rewrites files and would shift the line numbers.
+      - name: shellcheck
+        id: shellcheck
+        run: |
+          pre-commit run shellcheck --all-files |
+            reviewdog -efm='%f:%l:%c: %t%*[^:]: %m' -name=shellcheck \
+              -reporter=github-pr-annotations -filter-mode=nofilter \
+              -fail-level=any
+
+      - name: shfmt
+        # Report formatting too when shellcheck found something, but not when
+        # it never ran because the setup failed.
+        if: ${{ !cancelled() && steps.shellcheck.outcome != 'skipped' }}
+        run: |
+          # shfmt fixes the files in place, so the fix is the diff. A script
+          # it cannot parse fails the hook without changing anything, so its
+          # status is kept for after reviewdog.
+          status=0
+          pre-commit run shfmt --all-files || status=$?
+          git diff |
+            reviewdog -f=diff -f.diff.strip=1 -name=shfmt \
+              -reporter=github-pr-annotations -filter-mode=nofilter \
+              -fail-level=any
+          exit "$status"
