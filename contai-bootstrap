@@ -70,3 +70,6 @@ if test -n "$tool"; then
 fi
 
 exec bash
+
+echo $foo
+x=`ls`

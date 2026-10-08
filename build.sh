@@ -2,7 +2,7 @@
 set -eu
 
 docker build \
-	-t contai:latest \
+    -t contai:latest \
 	--build-arg "UID=${CONTAI_UID:-$(id -u)}" \
 	--build-arg "USERNAME=${CONTAI_USER:-$(id -un)}" \
 	--build-arg "GID=${CONTAI_GID:-$(id -g)}" \
