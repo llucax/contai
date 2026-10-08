@@ -24,11 +24,16 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          # The newest uv whose checksum this release of the action carries,
+          # so it is pinned by the action's hash and moves with its bumps.
+          version: latest-known
+
       - name: Install pre-commit
         run: |
-          python3 -m venv "$RUNNER_TEMP/venv"
-          "$RUNNER_TEMP/venv/bin/pip" install -r requirements-pre-commit.txt
-          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+          uv tool install --constraints requirements-pre-commit.txt pre-commit
+          uv tool dir --bin >> "$GITHUB_PATH"
 
       - uses: reviewdog/action-setup@d8a7baabd7f3e8544ee4dbde3ee41d0011c3a93f # v1.5.0
         with:

@@ -71,7 +71,7 @@ the version of each tool, and `shfmt` takes its settings from
 fix locally:
 
 ```sh
-pip install -r requirements-pre-commit.txt  # once, in a virtualenv
+uv tool install -c requirements-pre-commit.txt pre-commit  # once, and after bumps
 pre-commit run --all-files
 pre-commit install  # optional, to run the hooks on every commit
 ```
