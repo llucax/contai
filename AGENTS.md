@@ -15,12 +15,15 @@ Read README.md for complete project documentation including features and usage.
 
 ```
 contai/
+├── .editorconfig          # shfmt/editor settings
+├── .pre-commit-config.yaml  # shfmt and shellcheck hooks, pinned
 ├── AGENTS.md              # This file - AI agent instructions
 ├── README.md              # Project documentation
 ├── Dockerfile             # Container definition with dev tools
 ├── build.sh               # Build script with user permission handling
 ├── contai                 # Container runner script
 ├── contai-bootstrap       # Runtime container bootstrap for RTK setup
+├── requirements-pre-commit.txt  # pre-commit itself, pinned
 └── agent-instructions.md  # Global agent instructions for end users
 ```
 
@@ -58,22 +61,29 @@ This project has no test suite. Changes should be verified by:
 
 ## Linting
 
-No project-level linting is configured. However, the container includes these tools:
-- Shell: `shellcheck`, `shfmt`
-- Python: `ruff`, `flake8`, `pylint`, `mypy`, `black`, `isort`
-
-Formatting is enforced by `shfmt`, configured through `.editorconfig`. To
-check and fix locally:
+Shell scripts are checked by `shellcheck` and formatted by `shfmt`, both run
+through [pre-commit](https://pre-commit.com/). `.pre-commit-config.yaml` pins
+the version of each tool, and `shfmt` takes its settings from
+`.editorconfig`. To check and fix locally:
 
 ```sh
-shellcheck build.sh contai contai-bootstrap
-shfmt -d .   # report
-shfmt -w .   # fix
+pip install -r requirements-pre-commit.txt  # once, in a virtualenv
+pre-commit run --all-files
+pre-commit install  # optional, to run the hooks on every commit
 ```
 
-`shfmt` finds the extensionless scripts by their shebang, so no file list is
-needed. Do not hand-format against it: what `shfmt` produces is the house
-style by definition.
+The `shfmt` hook fixes files in place, so a failure means `git diff` has the
+fix. Do not hand-format against it: what `shfmt` produces is the house style
+by definition.
+
+pre-commit finds the extensionless scripts by their shebang, but only when
+they are executable: commit a new one with `chmod +x`, or it is silently
+skipped. List it in `.editorconfig` too, which matches scripts by name.
+
+The container also ships `shellcheck` and `shfmt`, plus Python linters
+(`ruff`, `flake8`, `pylint`, `mypy`, `black`, `isort`), but from Ubuntu: their
+versions can differ from the pinned ones, and a different `shfmt` can format
+differently.
 
 ## Code Style Guidelines
 
