@@ -77,9 +77,10 @@ pre-commit run --all-files
 pre-commit install  # optional, to run the hooks on every commit
 ```
 
-The `shfmt` hook fixes files in place, so a failure means `git diff` has the
-fix. Do not hand-format against it: what `shfmt` produces is the house style
-by definition.
+The `shfmt` hook fixes formatting differences in place, so `git diff` normally
+contains the fix. Parse errors also fail the hook without producing a diff.
+Do not hand-format against it: what `shfmt` produces is the house style by
+definition.
 
 Dependabot bumps the hooks, pre-commit and the actions. A `shfmt` bump that
 formats differently fails its own pull request: add the reformatting to it,
